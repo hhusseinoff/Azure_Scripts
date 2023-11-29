@@ -44,21 +44,34 @@
     - Error Code 16: FAILED to apply System State Backup Retention Policy to the System State Backup policy.
     - Error Code 17: FAILED to apply System State Backup policy.
 
+.PREREQUISITES
+
+    - Azure Powershell Module installed, for connecting to Azure under a service principal:
+    - TargetAppID must refer to an application in Azure that has atleast the "Backup Contributor" role for the target Recovery Vault
+    - "soft delete and security settings for hybrid workloads Security" setting in Azure portal for the target Recovery vault must be DISABLED
+    - If the executing machine is an Azure VM, Enable "soft delete for cloud workloads" security setting in Azure portal for the target Recovery Vault must be DISABLED
+
 .EXAMPLE
-    .\RegisterMARS_V3.ps1 -TargetTennantID 'xxxx' -TargetAppID 'xxxx' -TargetAppID_Secret 'xxxx' -TargetResourceGroupName 'xxxx' -TargetVaultName 'xxxx' -TargetSettingPassphrase 'xxxx' -TargetWorkHoursStart '08:00' -TargetWorkHoursEnd '17:00' -TargetWorkHourBandwidthMbps 100 -TargetNonWorkHourBandwidthMbps 50 -TargetFilesBackupExecDay 'Monday' -TargetFilesBackupExecTime '02:00' -TargetFilesBackupRetentionDays 30 -TargetSystemStateBackupExecDay 'Tuesday' -TargetSystemStateBackupExecTime '03:00' -TargetSystemStateRetentionDays 30
+    .\RegisterMARS_V3.1.ps1 -TargetTennantID 'xxxx' -TargetAppID 'xxxx' -TargetAppID_Secret 'xxxx' -TargetResourceGroupName 'xxxx' -TargetVaultName 'xxxx' -TargetSettingPassphrase 'xxxx' -TargetWorkHoursStart '08:00' -TargetWorkHoursEnd '17:00' -TargetWorkHourBandwidthMbps 100 -TargetNonWorkHourBandwidthMbps 50 -TargetFilesBackupExecDay 'Monday' -TargetFilesBackupExecTime '02:00' -TargetFilesBackupRetentionDays 30 -TargetSystemStateBackupExecDay 'Tuesday' -TargetSystemStateBackupExecTime '03:00' -TargetSystemStateRetentionDays 30
 
 .NOTES
     - Ensure that you have the necessary permissions to connect to Azure and access the specified resources.
     - The script creates log folders and files in the "C:\Temp" directory. Ensure that the directory exists or modify the script to use a different directory.
     - Always review and test the script in a safe environment before running it in production.
 
-Last Edit: Oct 20th, 2023
+Last Edit: Nov 29th, 2023
 
 -V3
 --Fixed Typos in comments section
 --Added subroutine for getting all logical drives, with free space greater than 0 bytes and adding them to the Files Backup Policy.
 --Added capability to delete passhrase backup txt after registration due to security concerns. Failure to delte it is non-critical and the script execution continues regardless.
 
+-V3.1
+--Fixed "Cannot convert 'System.String' to the type 'System.Management.Automation.SwitchParameter'" error when trying to set up Files Backup policy, issue was an empty parameter / typo on function
+---Set-OBPolicy -Policy $FilesBackupPolicy -Confirm:$false -ErrorAction SilentlyContinue, line 597
+--Fixed "'Microsoft.Internal.EnterpriseStorage.Dls.Utils.DlsException,CloudUtils" error when applying any policy. Root cause: 
+---Enable soft delete and security settings for hybrid workloads Security setting on Target Vault in Azure is Enabled, requiring an additional parameter - SecurityPIN for the Set-OBPolicy function
+---SecurityPIN Can't be generated programmatically, therefore has to be disabled
 #>
 
 
@@ -478,7 +491,7 @@ debug "Files Backup Schedule applied successfully."
 
 debug "Configuring Retention Policy..."
 
-$FilesBackupRetentionPolicy = New-OBRetentionPolicy -RetentionDays $TargetFilesBackupRetentionDays -
+$FilesBackupRetentionPolicy = New-OBRetentionPolicy -RetentionDays $TargetFilesBackupRetentionDays
 
 debug "Configured Files Backup Retention length to $TargetFilesBackupRetentionDays days."
 
