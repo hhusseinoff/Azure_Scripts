@@ -29,20 +29,21 @@
     - Error Code 1: FAILED to connect to Azure.
     - Error Code 2: FAILED to retrieve vault object.
     - Error Code 3: FAILED to download Vault Credentials file.
-    - Error Code 4: FAILED to import MSOnlineBackup PS Module.
-    - Error Code 5: FAILED to Register machine.
-    - Error Code 6: FAILED to set encryption passphrase.
-    - Error Code 7: FAILED to disable proxies.
-    - Error Code 8: FAILED to configure work hours and throttling settings.
-    - Error Code 9: FAILED to apply Files Backup Schedule to the Files Backup policy.
-    - Error Code 10: FAILED to apply Files Backup Retention Policy to the Files Backup policy.
-    - Error Code 11: FAILED to get logical disks info.
-    - Error Code 12: FAILED to apply Files Backup Item Inclusion Policy to the Files Backup Policy.
-    - Error Code 13: FAILED to apply Files Backup policy.
-    - Error Code 14: FAILED to add System State capability to System State Backup Policy object.
-    - Error Code 15: FAILED to apply System State Backup Schedule to the System State Backup policy.
-    - Error Code 16: FAILED to apply System State Backup Retention Policy to the System State Backup policy.
-    - Error Code 17: FAILED to apply System State Backup policy.
+    - Error Code 4: FAILED to remove orphaned Azure Backup certificates from previous setups
+    - Error Code 5: FAILED to import MSOnlineBackup PS Module.
+    - Error Code 6: FAILED to Register machine.
+    - Error Code 7: FAILED to set encryption passphrase.
+    - Error Code 8: FAILED to disable proxies.
+    - Error Code 9: FAILED to configure work hours and throttling settings.
+    - Error Code 10: FAILED to apply Files Backup Schedule to the Files Backup policy.
+    - Error Code 11: FAILED to apply Files Backup Retention Policy to the Files Backup policy.
+    - Error Code 12: FAILED to get logical disks info.
+    - Error Code 13: FAILED to apply Files Backup Item Inclusion Policy to the Files Backup Policy.
+    - Error Code 14: FAILED to apply Files Backup policy.
+    - Error Code 15: FAILED to add System State capability to System State Backup Policy object.
+    - Error Code 16: FAILED to apply System State Backup Schedule to the System State Backup policy.
+    - Error Code 17: FAILED to apply System State Backup Retention Policy to the System State Backup policy.
+    - Error Code 18: FAILED to apply System State Backup policy.
 
 .PREREQUISITES
 
@@ -59,7 +60,9 @@
     - The script creates log folders and files in the "C:\Temp" directory. Ensure that the directory exists or modify the script to use a different directory.
     - Always review and test the script in a safe environment before running it in production.
 
-Last Edit: Nov 29th, 2023
+Author : Hyusein Hyuseinov (hyusein.hyuseinov@zonalcontractor.co.uk)
+
+Last Edit: Dec 4th, 2023
 
 -V3
 --Fixed Typos in comments section
@@ -68,10 +71,24 @@ Last Edit: Nov 29th, 2023
 
 -V3.1
 --Fixed "Cannot convert 'System.String' to the type 'System.Management.Automation.SwitchParameter'" error when trying to set up Files Backup policy, issue was an empty parameter / typo on function
----Set-OBPolicy -Policy $FilesBackupPolicy -Confirm:$false -ErrorAction SilentlyContinue, line 597
+---Set-OBPolicy -Policy $FilesBackupPolicy -Confirm:$false -ErrorAction SilentlyContinue
 --Fixed "'Microsoft.Internal.EnterpriseStorage.Dls.Utils.DlsException,CloudUtils" error when applying any policy. Root cause: 
 ---Enable soft delete and security settings for hybrid workloads Security setting on Target Vault in Azure is Enabled, requiring an additional parameter - SecurityPIN for the Set-OBPolicy function
 ---SecurityPIN Can't be generated programmatically, therefore has to be disabled
+
+-V3.1.7
+--Added in-script Execution Policy handling
+--Added Temp Folder Clear (removes any logs and vault credentials left over from previous runs of the script)
+--Detection process for the available Disk Roots revised:
+---Data is collected for all available volumes via Get-Volume
+---For each volume, if the volume has ANY free space and it's file system is NTFS, it will be backed up
+
+-V3.1.8
+--Added -ErrorAction Ignore to the Temp Folder Clear Section
+
+-V3.2.0
+--Added Logic for removing Azure Backup Certificates from previous successful registrations and registration attempts. If present, they prevent self-signed authorization with the target recovery vault, producing error 130001.
+--Changed the Error codes list to reflect the above.
 #>
 
 
@@ -109,6 +126,10 @@ param(
     [Parameter(Mandatory=$true)]
     [long]$TargetSystemStateRetentionDays
 )
+
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false
+
+Remove-Item -Path "C:\Temp\RegisterMARS" -Recurse -Force -Confirm:$false -ErrorAction Ignore
 
 # Capture script directory
 $ScriptDir = $PSScriptRoot
@@ -183,6 +204,8 @@ if($Error[0])
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
     exit 1
 }
@@ -208,6 +231,8 @@ if($Error[0])
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
     exit 2
 }
@@ -232,6 +257,8 @@ if($Error[0])
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
     exit 3
 }
@@ -245,6 +272,148 @@ $CredsFilePathObj = Get-Item -Path "$CredsPath\$TargetVaultName*" -Force
 $CredsFilePathCleanString = $CredsFilePathObj.FullName
 
 debug "Vault Credentials full file path: $CredsFilePathCleanString"
+
+debug "Looking for orphaned Azure Backup - personal certificates..."
+
+$OrphanedVaultCertsSubject = "CN=$($TargetVaultName)*"
+
+$OrphanedMachineCerts = Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object { $_.Subject -like 'CN=CB*' }
+
+$OrphanedVaultCerts = Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object { $_.Subject -like $OrphanedVaultCertsSubject }
+
+if($OrphanedMachineCerts)
+{
+    debug "Orphaned Azure Backup Certificates from previous successful registration found:"
+
+    debug "-------------------------------------------------------------------------------"
+
+    debug "Thumbprint`tExpiration`tSubject"
+
+    debug "-------------------------------------------------------------------------------"
+
+    foreach($Cert in $OrphanedMachineCerts)
+    {
+        $OrphanedCertThumbprint = $Cert.Thumbprint
+
+        $OrphanedCertExpiry = $Cert.NotAfter
+
+        $OrphanedCertSubject = $Cert.Subject
+        
+        debug "$OrphanedCertThumbprint`t$OrphanedCertExpiry`t$OrphanedCertSubject"
+    }
+
+    debug "-------------------------------------------------------------------------------"
+
+    debug "Removing Orphaned Azure Backup Certificates from previous successful registrations..."
+
+    foreach($Cert in $OrphanedMachineCerts)
+    {
+        $CertPSPath = $Cert.PSPath
+
+        $OrphanedCertThumbprint = $Cert.Thumbprint
+
+        Remove-Item -Path $CertPSPath -Force -Confirm:$false -ErrorAction SilentlyContinue
+
+        $CertRemovedCheck = Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $OrphanedCertThumbprint }
+
+        if($CertRemovedCheck)
+        {
+            debug "Failed to delete orphaned Cert with thumbprint $OrphanedCertThumbprint."
+
+            debug "This will interfere with the machine registration, therefore exiting script...."
+
+            debug "Disconnecting AzAccount..."
+
+            Disconnect-AzAccount -Confirm:$false
+
+            debug "AzAccount disconnected."
+
+            debug "Exiting script with error code 4..."
+
+            debug "------------------------------------------------------------------------------------------------------------------------------------------------"
+
+            $Error.Clear()
+
+            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
+
+            exit 4
+
+        }
+        else
+        {
+            debug "Orphaned Certificate with thumbprint $OrphanedCertThumbprint successfully deleted."
+
+            continue
+        }
+    }
+}
+
+if($OrphanedVaultCerts)
+{
+    debug "Orphaned Azure Backup Certificates from previous registration attempts found:"
+
+    debug "-------------------------------------------------------------------------------"
+
+    debug "Thumbprint`tExpiration`tSubject"
+
+    debug "-------------------------------------------------------------------------------"
+
+    foreach ($Cert in $OrphanedVaultCerts)
+    {
+        $OrphanedCertThumbprint = $Cert.Thumbprint
+
+        $OrphanedCertExpiry = $Cert.NotAfter
+
+        $OrphanedCertSubject = $Cert.Subject
+        
+        debug "$OrphanedCertThumbprint`t$OrphanedCertExpiry`t$OrphanedCertSubject"
+    }
+
+    debug "-------------------------------------------------------------------------------"
+
+    debug "Removing Orphaned Azure Backup Certificates from previous registration Attempts..."
+
+    foreach($Cert in $OrphanedVaultCerts)
+    {
+        $CertPSPath = $Cert.PSPath
+
+        $OrphanedCertThumbprint = $Cert.Thumbprint
+
+        Remove-Item -Path $CertPSPath -Force -Confirm:$false -ErrorAction SilentlyContinue
+
+        $CertRemovedCheck = Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $OrphanedCertThumbprint }
+
+        if($CertRemovedCheck)
+        {
+            debug "Failed to delete orphaned Cert with thumbprint $OrphanedCertThumbprint."
+
+            debug "This will interfere with the machine registration, therefore exiting script...."
+
+            debug "Disconnecting AzAccount..."
+
+            Disconnect-AzAccount -Confirm:$false
+
+            debug "AzAccount disconnected."
+
+            debug "Exiting script with error code 4..."
+
+            debug "------------------------------------------------------------------------------------------------------------------------------------------------"
+
+            $Error.Clear()
+
+            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
+
+            exit 4
+
+        }
+        else
+        {
+            debug "Orphaned Certificate with thumbprint $OrphanedCertThumbprint successfully deleted."
+
+            continue
+        }
+    }
+}
 
 debug "Importing MSOnlineBackup PS Module..."
 
@@ -262,13 +431,15 @@ if(!($moduleImportedCheck))
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 4..."
+    debug "Exiting script with error code 5..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 4
+    exit 5
 }
 
 debug "MSOnlineBackup PS Module imported successfully."
@@ -289,13 +460,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 5..."
+    debug "Exiting script with error code 6..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 5
+    exit 6
 }
 
 debug "Configuring Machine Settings | Setting passphrase..."
@@ -316,13 +489,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 6..."
+    debug "Exiting script with error code 7..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 6
+    exit 7
 }
 
 debug "Passphrase setting complete. Deleting generated .txt file...."
@@ -365,13 +540,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 7..."
+    debug "Exiting script with error code 8..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 7
+    exit 8
 }
 
 debug "Configuring Machine Settings | Configuring Work hours and throttling settings..."
@@ -394,13 +571,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 8..."
+    debug "Exiting script with error code 9..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 8
+    exit 9
 }
 
 debug "Configuring machine settings complete."
@@ -478,13 +657,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 9..."
+    debug "Exiting script with error code 10..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 9
+    exit 10
 }
 
 debug "Files Backup Schedule applied successfully."
@@ -511,13 +692,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 10..."
+    debug "Exiting script with error code 11..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 10
+    exit 11
 }
 
 debug "Files Backup Retention Policy applied successfully."
@@ -538,26 +721,41 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 11..."
+    debug "Exiting script with error code 12..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 11
+    exit 12
 }
 
 debug "Logical Disks info retrieved succesfully."
 
 debug "Extracting Root Dirs for each disk..."
 
+$DisksInfo = Get-Volume
+
 $LogicalDiskRoots = @()
 
 foreach($Disk in $DisksInfo)
 {
-    if($Disk.Free -ge 0)
+    $driveLetter = $Disk.DriveLetter
+    $FreeSpace = $Disk.SizeRemaining
+    $FileSystemType = $Disk.FileSystemType
+
+    if($FreeSpace -ge 0)
     {
-        $LogicalDiskRoots = $LogicalDiskRoots + $Disk.Root
+        if($FileSystemType -eq "NTFS")
+        {
+            $DiskInfo = Get-PSDrive -PSProvider FileSystem -Name "$driveLetter" -ErrorAction SilentlyContinue
+            
+            $DiskInfoRoot = $DiskInfo.Root
+
+            $LogicalDiskRoots = $LogicalDiskRoots + $DiskInfoRoot
+        }
     }
 }
 
@@ -589,13 +787,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 12..."
+    debug "Exiting script with error code 13..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 12
+    exit 13
 }
 
 debug "Files Backup Item Inclusion Policy applied successfully."
@@ -616,13 +816,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 13..."
+    debug "Exiting script with error code 14..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 13
+    exit 14
 }
 
 debug "Files Backup Policy applied Successfully."
@@ -653,13 +855,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 14..."
+    debug "Exiting script with error code 15..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 14
+    exit 15
 }
 
 debug "Configuring Backup Schedule..."
@@ -725,13 +929,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 15..."
+    debug "Exiting script with error code 16..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 15
+    exit 16
 }
 
 debug "System State Backup Schedule applied successfully."
@@ -758,13 +964,15 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 16..."
+    debug "Exiting script with error code 17..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 16
+    exit 17
 }
 
 debug "System State Backup Retention Policy applied successfully."
@@ -785,17 +993,21 @@ if($Error[0])
 
     debug "AzAccount disconnected."
 
-    debug "Exiting script with error code 17..."
+    debug "Exiting script with error code 18..."
 
     debug "------------------------------------------------------------------------------------------------------------------------------------------------"
 
     $Error.Clear()
+
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
     
-    exit 17
+    exit 18
 }
 
 debug "System State Backup Policy applied Successfully."
 
 debug "Script execution finished successfully. Exiting..."
+
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -Confirm:$false
 
 exit 0
